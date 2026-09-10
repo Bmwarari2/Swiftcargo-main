@@ -132,7 +132,10 @@ export function AddOrderModal({ onClose, onCreated }) {
         notify: f.notify,
       })
       const o = res.data.order
-      toast.success(o.tracking_code ? `Order added — ${o.tracking_code}` : 'Order added')
+      // Always a number to read back: order_code is minted for every order
+      // (migration 0021), tracking codes only from 'paid' onward.
+      const ref = o.tracking_code || o.order_code
+      toast.success(ref ? `Order added — ${ref}` : 'Order added')
       onCreated?.(o)
       onClose()
     } catch (err) {
@@ -169,6 +172,10 @@ export function AddOrderModal({ onClose, onCreated }) {
           <span className={label}>Supplier order number</span>
           <input value={f.supplier_ref} onChange={(e) => setF({ ...f, supplier_ref: e.target.value })}
             placeholder="SHEIN or other retailer's own number — optional" className={field} />
+          <p className="text-xs text-mute mt-1.5">
+            Theirs, not ours. This order gets its own number (ORD-…) the moment you
+            add it, and that is what goes on the customer's quote.
+          </p>
         </div>
         <div>
           <span className={label}>Stage</span>

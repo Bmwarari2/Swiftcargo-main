@@ -19,7 +19,7 @@ import { deliveryFeeFor, effectiveFxRate, resolveMarkupPct, switchDeliveryMethod
 import { normalizeProductLinks } from '../utils/productLinks.js';
 import { transition, isValidEdge, sendCustomerStatusMessage } from '../utils/waOrderFlow.js';
 import { sendToContact } from '../utils/waSend.js';
-import { extractTrackingCode, extractCustomerCode, nextTrackingCode } from '../utils/waCodes.js';
+import { extractTrackingCode, extractOrderCode, extractCustomerCode, nextTrackingCode } from '../utils/waCodes.js';
 import { createSignedDownloadUrl } from '../utils/supabaseAdmin.js';
 import { receiptShortUrl, receiptToken } from '../utils/receiptLink.js';
 import { markPaymentPaid } from '../utils/markPaymentPaid.js';
@@ -41,14 +41,23 @@ const MPESA_TILL = mpesaTill();
 
 /**
  * What to call an order in a message. Tracking codes only exist from
- * payment onward, so before that fall back to the imported/original
- * reference in product_note, then to a short id — the customer needs
- * *something* to quote back at us.
+ * payment onward, so before that use the imported/original reference in
+ * product_note (a migrated 254shippers customer already knows that one),
+ * then the order number.
+ *
+ * The order number is why the last fallback is now unreachable in
+ * practice: order_code is NOT NULL with a default (migration 0021).
+ * Until it existed this function answered `#a3f9c2b1` — the first eight
+ * characters of the row's uuid — and that string went out on real quotes
+ * and real payment prompts as order_ref. Nobody reads that back to us,
+ * and nobody can search for it either. The `#` branch stays only for a
+ * partially-selected row.
  */
 function orderRef(order) {
   if (order.tracking_code) return order.tracking_code;
   const noted = String(order.product_note || '').match(/^[A-Z]{2,4}-[\d-]+/);
-  return noted ? noted[0] : `#${String(order.id).slice(0, 8)}`;
+  if (noted) return noted[0];
+  return order.order_code || `#${String(order.id).slice(0, 8)}`;
 }
 
 /**
@@ -87,10 +96,14 @@ router.get('/', authMiddleware, STAFF, async (req, res) => {
     }
     if (q) {
       const trk = extractTrackingCode(q);
+      const ord = extractOrderCode(q);
       const tc = extractCustomerCode(q);
       if (trk) {
         params.push(trk);
         where.push(`o.tracking_code = $${params.length}`);
+      } else if (ord) {
+        params.push(ord);
+        where.push(`o.order_code = $${params.length}`);
       } else if (tc) {
         params.push(tc);
         where.push(`c.customer_code = $${params.length}`);
@@ -105,7 +118,7 @@ router.get('/', authMiddleware, STAFF, async (req, res) => {
         const like = params.length;
         where.push(`(${exact} OR c.full_name ILIKE $${like} OR c.phone LIKE $${like}`
           + ` OR c.customer_code ILIKE $${like} OR o.tracking_code ILIKE $${like}`
-          + ` OR o.supplier_ref ILIKE $${like})`);
+          + ` OR o.order_code ILIKE $${like} OR o.supplier_ref ILIKE $${like})`);
       }
     }
     params.push(limit, offset);
@@ -295,13 +308,17 @@ router.post('/advance-batch', authMiddleware, STAFF, async (req, res) => {
 });
 
 /**
- * GET /api/wa/orders/scan/:code — scanner/search resolver. Accepts a
- * TRK code in any formatting; returns the order for the detail screen.
+ * GET /api/wa/orders/scan/:code — scanner/search resolver. Accepts a TRK
+ * or ORD code in any formatting; returns the order for the detail
+ * screen. ORD is here because an operator holding a quote the customer
+ * has quoted back at them has an order number and no parcel yet.
  */
 router.get('/scan/:code', authMiddleware, STAFF, async (req, res) => {
   try {
-    const code = extractTrackingCode(req.params.code) || req.params.code.trim().toUpperCase();
-    const { rows } = await req.db.query(`${ORDER_SELECT} WHERE o.tracking_code = $1`, [code]);
+    const code = extractTrackingCode(req.params.code) || extractOrderCode(req.params.code)
+      || req.params.code.trim().toUpperCase();
+    const { rows } = await req.db.query(
+      `${ORDER_SELECT} WHERE o.tracking_code = $1 OR o.order_code = $1`, [code]);
     if (!rows[0]) return res.status(404).json({ success: false, message: `No order with code ${code}` });
     res.json({ success: true, order: rows[0] });
   } catch (err) {
@@ -336,6 +353,10 @@ const STAGE_STAMP = {
  * stage tells the customer an amount, and 'paid' onwards mints a tracking
  * code — the code is the customer's handle on a parcel and must exist the
  * moment money has changed hands.
+ *
+ * The order number (ORD-3001) is not minted here: it is a column default
+ * (migration 0021), so it exists for every order this or any other code
+ * path creates, and comes back on the RETURNING row.
  *
  * Silent by default: back-filling history should not text somebody about
  * a parcel they received a week ago. Pass `notify: true` to send the

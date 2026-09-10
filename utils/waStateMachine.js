@@ -64,7 +64,7 @@
 // deploys/restarts never lose a customer mid-onboarding.
 
 import { sendToContact } from './waSend.js';
-import { extractTrackingCode, nextCustomerCode } from './waCodes.js';
+import { extractTrackingCode, extractOrderCode, nextCustomerCode } from './waCodes.js';
 import { pushToStaff } from '../routes/events.js';
 import { getWaSettings } from './waSettings.js';
 import { aiConfigured, chatReply, onboardingTurn, renderFacts, summarizeConversation } from './waAi.js';
@@ -404,10 +404,15 @@ export async function handleInbound(db, contact, message) {
     return handleOnboarding(db, contact, body, { settings });
   }
 
-  // 2. Tracking self-service.
-  const trackingCode = extractTrackingCode(body);
-  if (trackingCode) {
-    return replyTrackingStatus(db, contact, trackingCode);
+  // 2. Status self-service. Order numbers are answered here as well as
+  // tracking codes: since migration 0021 the quote and the payment
+  // prompt both carry ORD-3001, so for the whole pre-payment half of the
+  // pipeline that is the only code the customer has. Handing out a code
+  // and then not recognising it drops the message through to the
+  // assistant, which knows the transcript and not the order.
+  const statusCode = extractTrackingCode(body) || extractOrderCode(body);
+  if (statusCode) {
+    return replyOrderStatus(db, contact, statusCode);
   }
 
   // 3. Customer says they've paid — evaluated BEFORE the quote-confirm
@@ -1185,7 +1190,7 @@ export function asksHowToPay(value) {
  */
 async function replyWithPaymentDetails(db, contact) {
   const { rows } = await db.query(
-    `SELECT id, status, quote_kes, tracking_code, delivery_fee_kes,
+    `SELECT id, status, quote_kes, tracking_code, order_code, delivery_fee_kes,
             delivery_fee_waived, delivery_fee_paid_at, delivery_fee_in_quote
        FROM wa_orders
       WHERE contact_id = $1 AND status IN ('confirmed', 'quoted', 'in_kenya', 'delivery_fee_pending')
@@ -1203,7 +1208,11 @@ async function replyWithPaymentDetails(db, contact) {
 
   const order = owing[0];
   const till = mpesaTill();
-  const ref = order.tracking_code ? ` (${order.tracking_code})` : '';
+  // Nothing owing has a tracking code — that is minted at payment — so
+  // this named no order at all in exactly the case a customer is most
+  // likely to have two of them open.
+  const code = order.tracking_code || order.order_code;
+  const ref = code ? ` (${code})` : '';
 
   // A quote they have not accepted yet. Give them the number and the
   // till — that is what they asked for — but leave the money state alone;
@@ -1645,100 +1654,140 @@ async function handleOnboarding(db, contact, body, { settings = null } = {}) {
   }
 }
 
-// ── Tracking self-service ───────────────────────────────────────────────────
+// ── Status self-service ─────────────────────────────────────────────────────
+//
+// Answers a TRK code (the parcel) or an ORD number (the order). Both are
+// scoped to the contact who sent them — see the note on enumeration
+// below.
 
-async function replyTrackingStatus(db, contact, trackingCode) {
+async function replyOrderStatus(db, contact, code) {
   const { rows } = await db.query(
     `SELECT o.*, c.customer_code
        FROM wa_orders o
        JOIN wa_contacts c ON c.id = o.contact_id
-      WHERE o.tracking_code = $1`,
-    [trackingCode]
+      WHERE o.tracking_code = $1 OR o.order_code = $1`,
+    [code]
   );
   const order = rows[0];
   // Codes are sequential, so an unscoped reply let any onboarded contact
-  // walk TRK-8800, TRK-8801, … and read every parcel's status, milestone
-  // dates and outstanding fee. A code that isn't yours gets the same
-  // wording as one that doesn't exist — the difference is nobody's
-  // business — and a person can still help with the legitimate
-  // checking-for-a-friend case.
+  // walk TRK-8800, TRK-8801, … (and now ORD-3001, ORD-3002, …) and read
+  // every order's status, milestone dates and outstanding fee. The order
+  // number needs this at least as much as the tracking code did: it
+  // exists from the moment an order is created, so the range that
+  // resolves is every order the business has ever taken, priced or not.
+  // A code that isn't yours gets the same wording as one that doesn't
+  // exist — the difference is nobody's business — and a person can still
+  // help with the legitimate checking-for-a-friend case.
   if (!order || order.contact_id !== contact.id) {
     return sendToContact(db, contact, {
       text:
-        `We couldn't find a parcel with code ${trackingCode} on this number — double-check the code ` +
-        `on your receipt. If you're checking a parcel for someone else, reply here and our team will help.`,
+        `We couldn't find an order with code ${code} on this number — double-check the code ` +
+        `on your quote or receipt. If you're checking an order for someone else, reply here and our team will help.`,
     });
   }
 
-  return sendToContact(db, contact, { text: parcelStateSentence(order, trackingCode) });
+  return sendToContact(db, contact, { text: parcelStateSentence(order, code) });
 }
 
 /**
- * Where the parcel is, in a sentence or two. That is the entire question
- * behind "TRK-8822?" — an earlier version answered with a status label, a
- * progress bar, a next-step line and the amount paid, which restated the
- * same fact three times and buried it. Each status owns its own wording
- * so the update reads like a person wrote it.
+ * Where the order is, in a sentence or two. That is the entire question
+ * behind "TRK-8822?" or "ORD-3001?" — an earlier version answered with a
+ * status label, a progress bar, a next-step line and the amount paid,
+ * which restated the same fact three times and buried it. Each status
+ * owns its own wording so the update reads like a person wrote it.
+ *
+ * `code` is whichever code the customer used, echoed back so they can
+ * see we are answering about the thing they asked about.
  */
-function parcelStateSentence(order, trackingCode) {
+function parcelStateSentence(order, code) {
   const on = (d) => (d ? ` on ${new Date(d).toLocaleDateString('en-KE', { day: 'numeric', month: 'long' })}` : '');
   const feeDue = order.status === 'delivery_fee_pending' && !order.delivery_fee_waived
     && !order.delivery_fee_paid_at && Number(order.delivery_fee_kes) > 0;
 
   switch (order.status) {
     case 'paid':
-      return `${trackingCode} — we received your payment${on(order.paid_at)} and we're buying your item now. `
+      return `${code} — we received your payment${on(order.paid_at)} and we're buying your item now. `
         + `We'll let you know the moment it's purchased.`;
 
     case 'purchased':
       // The 2–3 week stretch with nothing to say is where "where is my
       // parcel?" volume comes from — a coarse honest window beats
       // repeating the same sentence with no horizon.
-      return `${trackingCode} — your item was purchased${on(order.purchased_at)} and is on its way to our facility. `
+      return `${code} — your item was purchased${on(order.purchased_at)} and is on its way to our facility. `
         + `Most parcels land in Kenya within 14 to 21 days of purchase — we'll message you the moment yours does.`;
 
     case 'in_kenya':
       // A customer who chose to collect is not waiting on a rider, and
       // telling them one is coming sends them to the wrong place.
       return order.delivery_method === 'collection'
-        ? `${trackingCode} — your parcel arrived${on(order.arrived_at)} and is ready to collect at `
+        ? `${code} — your parcel arrived${on(order.arrived_at)} and is ready to collect at `
           + `Stanbank House, 4th floor, room 28, Nairobi CBD. We're open Monday to Saturday, closed Sunday.`
-        : `${trackingCode} — your parcel arrived in Kenya${on(order.arrived_at)}. `
+        : `${code} — your parcel arrived in Kenya${on(order.arrived_at)}. `
           + `We're getting it ready and will send it on to you shortly.`;
 
     case 'delivery_fee_pending':
       return feeDue
-        ? `${trackingCode} — your parcel arrived in Kenya${on(order.arrived_at)} and is ready to send out. `
+        ? `${code} — your parcel arrived in Kenya${on(order.arrived_at)} and is ready to send out. `
           + `Last step is the delivery fee of KSh ${Number(order.delivery_fee_kes).toLocaleString('en-KE')}: `
           + `Lipa na M-Pesa, Buy Goods, Till ${mpesaTill()}. Reply here once you've paid and we'll dispatch it.`
-        : `${trackingCode} — your parcel arrived in Kenya${on(order.arrived_at)} and will be dispatched to your address shortly.`;
+        : `${code} — your parcel arrived in Kenya${on(order.arrived_at)} and will be dispatched to your address shortly.`;
 
     case 'collected':
-      return `${trackingCode} — you collected this${on(order.delivered_at)}. `
+      return `${code} — you collected this${on(order.delivered_at)}. `
         + `Asante for shopping with Thapsus Cargo. Send us another link any time.`;
 
     case 'dispatched':
-      return `${trackingCode} — your parcel went out for delivery${on(order.dispatched_at)}. `
+      return `${code} — your parcel went out for delivery${on(order.dispatched_at)}. `
         + `Our rider will call you when they arrive, usually within 24 hours.`;
 
     case 'delivered':
-      return `${trackingCode} — delivered${on(order.delivered_at)}. Asante for shopping with Thapsus Cargo. `
+      return `${code} — delivered${on(order.delivered_at)}. Asante for shopping with Thapsus Cargo. `
         + `Send us another link whenever you're ready.`;
 
     case 'cancelled':
-      return `${trackingCode} — this order was cancelled. Reply here if that's unexpected and we'll sort it out.`;
+      return `${code} — this order was cancelled. Reply here if that's unexpected and we'll sort it out.`;
 
-    // Pre-payment states can't normally be reached by a tracking lookup
-    // (the code is minted when the payment settles), but an operator can
-    // move an order backwards, so answer rather than say nothing.
-    case 'confirmed':
-      return `${trackingCode} — we're waiting on your payment to start buying. Reply here if you need the till details again.`;
+    // Pre-payment states used to be all but unreachable here — the code
+    // was minted when the payment settled — so all three shared one
+    // sentence: "we're still finalising your quote. We'll send it here
+    // shortly." Order numbers make these the states this lookup answers
+    // MOST often, and that sentence was wrong in two ways at once for a
+    // quoted order: the quote is not being finalised, it was sent, and
+    // the reply promised a message behind it that nothing was going to
+    // send. That is the shape of the eighteen hours +254790325255 spent
+    // being told her quote was coming. Every figure below is read off
+    // the order row; nothing here computes a total.
+    case 'confirmed': {
+      const due = Number(order.quote_kes);
+      const till = mpesaTill();
+      return due > 0
+        ? `${code} — confirmed, and we start buying the moment your payment lands. `
+          + `Total: KSh ${due.toLocaleString('en-KE')}. `
+          + `Lipa na M-Pesa, Buy Goods${till ? `, Till ${till}` : ''}. `
+          + `Reply here once you've paid and we'll confirm it.`
+        : `${code} — confirmed. Reply here if you need the payment details.`;
+    }
+
+    case 'quoted': {
+      const total = Number(order.quote_kes);
+      return total > 0
+        ? `${code} — your quote is KSh ${total.toLocaleString('en-KE')}`
+          + (order.quote_expires_at
+            ? `, held until ${new Date(order.quote_expires_at)
+              .toLocaleDateString('en-KE', { day: 'numeric', month: 'long' })}`
+            : '')
+          + `. Reply *YES* to confirm and we'll send the M-Pesa details.`
+        : `${code} — your quote is with you and we're waiting on your go-ahead.`;
+    }
+
     case 'quoting':
-    case 'quoted':
-      return `${trackingCode} — we're still finalising your quote. We'll send it here shortly.`;
+      // No price yet, and no promise of when one arrives: the only thing
+      // watching a 'quoting' order is a person.
+      return `${code} — we have your item and we're working out the price. `
+        + `Nothing is needed from you yet.`;
 
     default:
-      return `${trackingCode} — ${STATUS_LABEL[order.status] || order.status}. Reply here if you need anything else.`;
+      return `${code} — ${STATUS_LABEL[order.status] || order.status}. Reply here if you need anything else.`;
   }
 }
 
