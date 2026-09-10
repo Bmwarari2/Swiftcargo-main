@@ -76,7 +76,7 @@ function promoLine(settings) {
 // sent.
 async function quoteFollowUps(pool, settings) {
   const { rows } = await pool.query(
-    `SELECT o.id, o.quote_kes, o.quote_expires_at, o.tracking_code,
+    `SELECT o.id, o.quote_kes, o.quote_expires_at, o.tracking_code, o.order_code,
             c.id AS contact_id, c.phone, c.full_name
        FROM wa_orders o JOIN wa_contacts c ON c.id = o.contact_id
       WHERE o.status = 'quoted'
@@ -110,7 +110,12 @@ async function quoteFollowUps(pool, settings) {
       templateKey: 'quote_reminder',
       templateParams: {
         full_name: o.full_name,
-        order_ref: o.tracking_code || 'your order',
+        // A quoted order has no tracking code — that is minted at
+        // payment — so this said "your order" to every customer it has
+        // ever chased. The order number exists from creation, and a
+        // customer holding two open quotes could not tell which one this
+        // was about.
+        order_ref: o.tracking_code || o.order_code || 'your order',
         total_kes: amount,
       },
       text:

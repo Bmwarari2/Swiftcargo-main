@@ -417,7 +417,7 @@ export function Inbox() {
                   {orders.slice(0, 6).map((o) => (
                     <button key={o.id} onClick={() => navigate(`/ops/orders/${o.id}`)}
                       className="shrink-0 inline-flex items-center gap-2 px-2.5 py-1 rounded-lg bg-white/5 border border-line hover:bg-white/10">
-                      <span className="text-xs font-bold text-white">{o.tracking_code || 'Quote'}</span>
+                      <span className="text-xs font-bold text-white">{o.tracking_code || o.order_code || 'Quote'}</span>
                       <StatusBadge status={o.status} />
                     </button>
                   ))}

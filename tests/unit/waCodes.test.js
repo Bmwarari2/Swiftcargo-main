@@ -3,6 +3,7 @@ import {
   nextCustomerCode,
   nextTrackingCode,
   extractTrackingCode,
+  extractOrderCode,
   extractCustomerCode,
 } from '../../utils/waCodes.js';
 
@@ -40,6 +41,37 @@ describe('extractTrackingCode', () => {
     [undefined],
   ])('returns null for %j', (input) => {
     expect(extractTrackingCode(input)).toBe(null);
+  });
+});
+
+describe('extractOrderCode', () => {
+  // The order number goes out on the quote and on the payment prompt,
+  // long before a parcel exists, so it is the code a customer types back
+  // at us — in whatever shape they type it.
+  it.each([
+    ['ORD-3001', 'ORD-3001'],
+    ['ord 3001', 'ORD-3001'],
+    ['Ord3001', 'ORD-3001'],
+    ['any news on ord-3001?', 'ORD-3001'],
+  ])('extracts from %j', (input, expected) => {
+    expect(extractOrderCode(input)).toBe(expected);
+  });
+
+  it.each([
+    ['TRK-8821'],          // a parcel, not an order
+    ['TC-1042'],           // a customer, not an order
+    ['ORD-'],              // no digits
+    ['I ordered this last week'],
+    [null],
+  ])('returns null for %j', (input) => {
+    expect(extractOrderCode(input)).toBe(null);
+  });
+
+  // The three code types must not answer to each other: telling a
+  // customer about the wrong order is worse than not recognising a code.
+  it('does not cross-match the other two code types', () => {
+    expect(extractTrackingCode('ORD-3001')).toBe(null);
+    expect(extractCustomerCode('ORD-3001')).toBe(null);
   });
 });
 

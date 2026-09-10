@@ -201,6 +201,43 @@ describe.skipIf(SKIP)('POST /api/wa/orders — operator logs a mid-flight order'
     expect(r.status).toBe(201);
     expect(r.body.order.status).toBe('quoting');
     expect(r.body.order.tracking_code).toBeNull();
+    // ...but never without a number. Before migration 0021 an order with
+    // no tracking code had no name at all, and the quote that went out
+    // called it "#" plus eight characters of its uuid.
+    expect(r.body.order.order_code).toMatch(/^ORD-\d+$/);
+  });
+
+  it('gives every order its own number, whatever stage it starts at', async () => {
+    const a = await post({ product_note: 'first' });
+    const b = await post({ status: 'purchased', quote_kes: 4200, product_note: 'second' });
+    expect(a.body.order.order_code).toMatch(/^ORD-\d+$/);
+    expect(b.body.order.order_code).toMatch(/^ORD-\d+$/);
+    expect(a.body.order.order_code).not.toBe(b.body.order.order_code);
+    // The two codes name different things: one order, one parcel.
+    expect(b.body.order.tracking_code).toMatch(/^TRK-\d+$/);
+    expect(b.body.order.tracking_code).not.toBe(b.body.order.order_code);
+  });
+
+  it('finds an order by the number the customer was given', async () => {
+    const created = await post({ product_note: 'searchable' });
+    const code = created.body.order.order_code;
+    // Typed back the way a customer types it, lower case and spaced.
+    const r = await request(app)
+      .get(`/api/wa/orders?q=${encodeURIComponent(code.toLowerCase().replace('-', ' '))}&limit=100`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(r.status).toBe(200);
+    expect(r.body.orders.map((o) => o.id)).toContain(created.body.order.id);
+  });
+
+  it('resolves an order number through the scanner endpoint', async () => {
+    // An operator holding a quote the customer quoted back at them has an
+    // order number and no parcel.
+    const created = await post({ product_note: 'scannable' });
+    const r = await request(app)
+      .get(`/api/wa/orders/scan/${created.body.order.order_code}`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(r.status).toBe(200);
+    expect(r.body.order.id).toBe(created.body.order.id);
   });
 
   it('creates an order dropped straight into a later stage, with a tracking code', async () => {

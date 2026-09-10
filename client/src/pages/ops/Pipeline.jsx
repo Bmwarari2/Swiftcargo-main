@@ -220,7 +220,7 @@ export function Pipeline() {
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="Search by TRK-code, TC-code, supplier order, name or phone… (USB scanners type here too)"
+          placeholder="Search by ORD-number, TRK-code, TC-code, supplier order, name or phone… (USB scanners type here too)"
           className="w-full pl-11 pr-4 py-3 rounded-xl bg-white/5 border border-line text-white placeholder:text-mute focus:outline-none focus:border-ember-500/50"
         />
       </form>
@@ -299,7 +299,7 @@ export function Pipeline() {
                     <div className="flex items-center justify-between gap-2 mb-1.5">
                       <span className="font-bold text-white text-sm truncate">
                         {(tagging || advancing) && (picked.has(o.id) ? '☑ ' : '☐ ')}
-                        {o.tracking_code || o.customer_code || 'New quote'}
+                        {o.tracking_code || o.order_code || o.customer_code || 'New quote'}
                       </span>
                       <StatusBadge status={o.status} />
                     </div>

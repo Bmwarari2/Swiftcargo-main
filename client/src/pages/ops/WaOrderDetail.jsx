@@ -288,7 +288,7 @@ export function WaOrderDetail() {
       </Link>
       <div className="flex flex-wrap items-start justify-between gap-4">
         <PageHeading icon={Package}
-          title={order.tracking_code || 'New quote'}
+          title={order.tracking_code || order.order_code || 'New quote'}
           subtitle={`${order.full_name || order.phone} · ${order.customer_code || 'onboarding'}`} />
         <div className="flex items-center gap-2">
           <StatusBadge status={order.status} />
@@ -643,7 +643,7 @@ export function WaOrderDetail() {
                     <Link key={s.id} to={`/ops/orders/${s.id}`}
                       className="flex items-center justify-between gap-2 text-xs hover:bg-white/5 rounded px-1.5 py-1 -mx-1.5">
                       <span className="text-ember-400 font-bold shrink-0">
-                        {s.tracking_code || s.customer_code || 'New quote'}
+                        {s.tracking_code || s.order_code || s.customer_code || 'New quote'}
                       </span>
                       <span className="text-mute truncate">{s.full_name || s.phone}</span>
                     </Link>

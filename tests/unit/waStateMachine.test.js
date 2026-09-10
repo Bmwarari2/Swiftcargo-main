@@ -245,6 +245,71 @@ describe('tracking auto-reply', () => {
     expect(reply).not.toContain('\n');
     expect(flattenForFreeText(reply)).toBe(reply);
   });
+
+  // Order numbers (ORD-3001) exist from creation, so they are the code a
+  // customer holds for the whole pre-payment half of the pipeline — the
+  // half where they are deciding whether to spend the money. Before
+  // migration 0021 the only code that resolved here was minted at
+  // payment, so a customer quoting the reference off their own quote got
+  // whatever the assistant made of it.
+  const ordDb = (over) => makeDb(async (sql) =>
+    (sql.includes('order_code') ? { rows: [trackedOrder(over)] } : { rows: [] }));
+
+  it('answers an ORD number in any formatting', async () => {
+    const db = ordDb({ status: 'quoted', tracking_code: null, order_code: 'ORD-3001' });
+    await handleInbound(db, contact(), { id: 'm', body: 'any update on ord 3001?' });
+    const lookup = db.query.mock.calls.find(([sql]) => sql.includes('order_code'));
+    expect(lookup[1]).toEqual(['ORD-3001']);
+    expect(sendToContact.mock.calls[0][2].text).toMatch(/^ORD-3001 —/);
+  });
+
+  it('tells a quoted customer the price, not that a quote is coming', async () => {
+    // The old wording for every pre-payment state was "we're still
+    // finalising your quote. We'll send it here shortly." — false for a
+    // quoted order (it was sent), and a promise of a message nothing was
+    // going to send. That is the sentence +254790325255 was effectively
+    // given four times over eighteen hours.
+    await handleInbound(
+      ordDb({ status: 'quoted', tracking_code: null, order_code: 'ORD-3001',
+        quote_kes: '17746', quote_expires_at: '2026-09-12' }),
+      contact(), { id: 'm', body: 'ORD-3001' });
+    const reply = sendToContact.mock.calls[0][2].text;
+    expect(reply).toMatch(/KSh 17,746/);
+    expect(reply).toMatch(/held until 12 September/);
+    expect(reply).not.toMatch(/finalising|shortly|will send|we'll send it/i);
+  });
+
+  it('gives a confirmed customer the amount and the till', async () => {
+    // The customer with KSh 17,746 confirmed asked how to pay four
+    // times. Anything that can answer that answers it.
+    await handleInbound(
+      ordDb({ status: 'confirmed', tracking_code: null, order_code: 'ORD-3001', quote_kes: '17746' }),
+      contact(), { id: 'm', body: 'ORD-3001' });
+    const reply = sendToContact.mock.calls[0][2].text;
+    expect(reply).toMatch(/KSh 17,746/);
+    expect(reply).toMatch(/Buy Goods/);
+  });
+
+  it('promises nothing on an order that has no price yet', async () => {
+    // Nothing sweeps a 'quoting' order — every stalled-quote query in
+    // the repo keys on status = 'quoted' — so a reply that promises the
+    // quote is on its way is a promise with nothing behind it.
+    await handleInbound(
+      ordDb({ status: 'quoting', tracking_code: null, order_code: 'ORD-3001', quote_kes: null }),
+      contact(), { id: 'm', body: 'ORD-3001' });
+    const reply = sendToContact.mock.calls[0][2].text;
+    expect(reply).toMatch(/working out the price/i);
+    expect(reply).not.toMatch(/shortly|send it here|on its way to you/i);
+  });
+
+  it("will not read out somebody else's order", async () => {
+    // Codes are sequential and now start at the moment an order exists,
+    // so the guessable range is every order the business has taken.
+    await handleInbound(
+      ordDb({ contact_id: 'someone-else', tracking_code: null, order_code: 'ORD-3002' }),
+      contact(), { id: 'm', body: 'ORD-3002' });
+    expect(sendToContact.mock.calls[0][2].text).toMatch(/couldn't find/i);
+  });
 });
 
 describe('quote confirmation', () => {

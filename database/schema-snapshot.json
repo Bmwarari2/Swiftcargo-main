@@ -3570,6 +3570,11 @@
     "nn": false,
     "t": "numeric"
    },
+   "order_code": {
+    "hd": true,
+    "nn": true,
+    "t": "text"
+   },
    "paid_at": {
     "hd": false,
     "nn": false,
